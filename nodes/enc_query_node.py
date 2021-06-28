@@ -1,236 +1,141 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 from __future__ import print_function
-import os
-import glob
-try:
-    ROS = True
-    import rospy
-    import project11
-    from enc_query.srv import enc_query_srv, enc_query_srvResponse
-    from enc_query.msg import enc_feature_msg
-except ImportError:
-    ROS = False
-from osgeo import ogr
-import glob
-from socket import *
-import geopandas as gpd
-import pandas as pd
-import matplotlib.pyplot as plt
-from shapely.geometry import Polygon
-from osgeo import ogr
-import pickle
 
-class enc_query:
-    """ Class for querying a ENC_ROOT folder of enc maps for features of type point within a input polygon. """
-    
-    fov = None
-    # layerNames = []
-    featureDataframe = None
-    isROS = False;
-    def __init__(self,enc_root, isROS):
-        self.isROS = isROS
-        self.enc_root = enc_root
-        filenames = glob.glob(os.path.join(enc_root,'*/*.000'))
-        #filenames = ['US2EC03M', 'US2EC04M', 'US3EC10M', 'US3EC11M', 'US4MA04M', 'US4MA19M', 'US4ME01M', 'US5MA1AM', 'US5MA04M', 'US5MA19M', 'US5ME01M', 'US5NH01M', 'US5NH02M']
-        layerNames = ['BCNCAR', 'BCNISD', 'BCNLAT', 'BCNSAW', 'BCNSPP', 'BOYCAR', 'BOYINB', 'BOYISD', 'BOYLAT', 'BOYSAW', 'BOYSPP', 'CGUSTA', 'CTRPNT', 'CURENT', 'DAYMAR', 'DISMAR', 'FOGSIG', 'LIGHTS', 'LITFLT', 'LITVES', 'PILPNT', 'RADRFL', 'RADSTA', 'RDOSTA', 'RETRFL', 'RSCSTA', 'RTPBCN', 'SISTAT', 'SISTAW', 'SOUNDG', 'SPRING', 'TOPMAR', 'UWTROC']
-        # filenames = ["US5NH01M"]
+import math
+import time
 
-        features = []
-        rospy.loginfo("Loading " + str(len(filenames)) +' datasets...')
-        for filename in filenames:    
-            #ds = ogr.Open(self.enc_root + '/' + filename + '/' + filename + '.000')
-            ds = ogr.Open(filename)
-            layers = self.getLayersByNames(ds,layerNames)
-            # rospy.loginfo("layers: " + str(layers))
-            features += self.getAllFeatures(layers)
-        # rospy.loginfo("features:"+ str(features))
-        df = pd.DataFrame.from_records(features, columns=['name', 'fid', 'longitude', 'latitude'])
-        self.featureDataframe = gpd.GeoDataFrame(df,geometry=gpd.points_from_xy(df.longitude, df.latitude))
-        rospy.loginfo("Loading " + str(len(filenames)) +" done.")
+import rospy
+import tf2_ros
+from enc_query.query import Query
+from geographic_msgs.msg import GeoPose, GeoPath, GeoPoint
+from geographic_visualization_msgs.msg import GeoVizItem, GeoVizPolygon, GeoVizPointList
+from nav_msgs.msg import Odometry
+from std_msgs.msg import ColorRGBA
+from tf.transformations import euler_from_quaternion
+from tf2_geometry_msgs import do_transform_pose
 
-    @classmethod
-    def ROS_Query(cls, enc_root):
-        return cls(enc_root, True)
-    @classmethod
-    def UDP_Query(cls, enc_root):
-        return cls(enc_root, False)
-
-    def getLayers(self,ds):
-        """Get all layers in input dataset
-
-        Args:
-            ds (ogr.DataSource): dataset to query
-
-        Returns:
-            ogr.Layer[]: List of layers 
-        """
-        numLayers = ds.GetLayerCount()
-        layers = []
-        for i in range(numLayers):
-            layers.append(ds.GetLayerByIndex(i))
-        return layers
+import project11
 
 
-    def getFeatures(self,layer):
-        """Get all the features from the provided layer
-
-        Args:
-            layer (ogr.Layer): layer to pull features from
-
-        Returns:
-            ogr.Feature[]: featuers in layer
-        """     
-        numFeatures = layer.GetFeatureCount()
-        features = []
-        for i in range(numFeatures):
-            feature = layer.GetNextFeature()
-            if feature is not None:
-                geomRef = feature.GetGeometryRef()
-                if((geomRef is not None and geomRef.GetPointCount() != 0)):
-                    features.append(self.getFeatureInfo(feature))
-        return features
-
-
-    def getAllFeatures(self,layers):
-        """Get all features from all input layers 
-
-        Args:
-            layers (ogr.Layer[]): List of layers
-
-        Returns:
-            ogr.Feature[]: List of features with layers
-        """ 
-        features = []
-        for layer in layers:
-            features += self.getFeatures(layer)
-        return features
-
-    def getLayersByNames(self,ds, layerNames):
-        """Get layers from datasource using specific layer names
-
-        Args:
-            ds (ogr.Datasource): datasource to query
-            layerNames (String[]): List of strings
-
-        Returns:
-            ogr.Layer[]: List of layers from datasource
-        """
-        layers = []
-        not_found = []
-        for layerName in layerNames:
-            layer = ds.GetLayer(layerName)
-            if layer is None:
-                not_found.append(layerName)
-                #rospy.loginfo("Layer not found: " + layerName )
-            else:
-                layers.append(layer)
-        if len(not_found):
-            rospy.logdebug("Layers not found in " + ds.GetName() + ": " + str(not_found))
-        return layers
-        
-    def getFeatureInfo(self,feature):
-        """Given a feauture, get the featurename, featureID, longitude, and latitude of feature.
-
-        Args:
-            feature (ogr.Feature): feature 
-
-        Returns:
-            tuple: featureName, FID, longitude, latitude
-        """
-        geomRef = feature.GetGeometryRef()
-        nameIndex = feature.GetFieldIndex("OBJNAM")
-        featureName = "NO OBJNAM"
-        if(nameIndex != -1 and feature.GetFieldAsString(nameIndex) != "" ):
-            featureName = feature.GetFieldAsString(nameIndex)
-        featureInfo = (featureName, feature.GetFID(), geomRef.GetX(), geomRef.GetY())
-        # rospy.loginfo(featureInfo)
-        return featureInfo
-
-
-    def geoPathToGPD(self, inFOV):
-        """Take a geoPath message and convert into GeoPandas Dataframe
-
-        Args:
-            inFOV (GeoPath): ros message GeoPath
-
-        Returns:
-            GeoDataFrame: dataframe containing only the polygon in geometry column
-        """ 
+def calculate_fov(heading, position, distance):
+    if heading is not None and position is not None:
+        long = position[1]
+        lat = position[0]
+        angle = heading
         points = []
-        for geoPose in inFOV:
-            points.append((geoPose.position.longitude, geoPose.position.latitude))
-        poly = Polygon(points)
-        # rospy.logerr("FOVPoly:"+ str(poly))
-        return gpd.GeoDataFrame({'geometry': [poly]})
-
-    def pickleToGPD(self,inFOV):
-        points = pickle.loads(inFOV)
-        poly = Polygon(points)
-        return gpd.GeoDataFrame({'geometry': [poly]})
+        for i in range(9):
+            point_radians = project11.geodesic.direct(long, lat, angle, distance)
+            point_degrees = (math.degrees(point_radians[0]), math.degrees(point_radians[1]))
+            points.append(point_degrees)
+            angle = angle + math.radians(45)
+        # rospy.logerr(points)
+        return points
 
 
+def points_to_path(points):
+    # init path and add points
+    # rospy.logerr(points)
+    fov_path = GeoPath()
 
-    def run(self, req):
-        """Find all features in polygon using GeoPandas sjoin spatial indexing feature.
-
-        Returns:
-            enc_feature_msg: ros feature msg containing feauture  name, longitude, latitude, fid
-        """
-
-        if(self.isROS):
-            featureList = []
-            self.fov = self.geoPathToGPD(req.fov)
-        else:
-            self.fov = self.pickleToGPD(req)
+    for i in range(len(points)):
+        pose = GeoPose()
+        pose.position.longitude = points[i][0]
+        pose.position.latitude = points[i][1]
+        fov_path.poses.append(pose)
+    rospy.logerr(fov_path)
+    return fov_path
 
 
-            
-        response = []
-    
-        featuresInView = gpd.sjoin(self.featureDataframe, self.fov, op='within')     
-        for index, feature in featuresInView.iterrows():
-            if(self.isROS):
-                response.append(enc_feature_msg(feature["name"], feature["longitude"],feature["latitude"], feature["fid"]))
-            else:
-                response.append((feature["name"], feature["longitude"],feature["latitude"], feature["fid"]))
-        if(self.isROS):
-            return enc_query_srvResponse(response)
-        return response
+def geopath_to_geovizpoly(path):
+    poly = GeoVizPolygon()
+    for geoPose in path.poses:
+        poly.outer.points.append(geoPose.position)
+    poly.fill_color = ColorRGBA(1, 0, 0, .2)
+    return poly
 
-    # def service_testing(self):
-    #     featureList = []
-    #     self.fov = Polygon([(-70.855,43.123),(-70.855,43.12),(-70.863,43.12),(-70.863,43.123)])
-    #     featureList = self.run()
-    #     print(featureList)
-    #     # return enc_query_srvResponse(featureList)
-           
 
-def enc_query_server(isROS):
-    """Initialize node for ros server or UDP server
-    """
-    if(isROS):
-        rospy.init_node('enc_query_node')
-        enc_root = rospy.get_param('enc_root')
-        obj = enc_query.ROS_Query(enc_root)
-        s = rospy.Service('enc_query_node', enc_query_srv, obj.run)
-        rospy.spin()
-    else:
-        serverSocket = socket(AF_INET, SOCK_DGRAM)
-        serverSocket.bind(('', 12000))
-        obj = enc_query.UDP_Query("/home/thomas/Downloads/ENC_ROOT")
+class FOVQuery:
+    def __init__(self, distance):
+        self.distance = distance
+        self.time_log = [0, 0]
+        self.odometry = None
+        rospy.Subscriber('odom', Odometry, self.odometry_callback, queue_size=1)
+        self.tfBuffer = tf2_ros.Buffer()
+        self.listener = tf2_ros.TransformListener(self.tfBuffer)
 
-        # long, lat = -70.855,43.123
-        print("Server running...")
-        while True:
-            fov, address = serverSocket.recvfrom(1024)
-            response = obj.run(fov)
-            print(response)
-            response = pickle.dumps(response)
-            serverSocket.sendto(response,address)
+        # init VizItem and add polygon
+        self.fov_viz_item = GeoVizItem()
+        self.fov_viz_item.polygons.append(GeoPath())
+        self.fov_viz_item.id = "FOV"
 
+        self.query = Query("/home/thomasdonnelly/Downloads/ENC_ROOT")
+
+    def iterate(self, data):
+        # calculate fov for current position
+        fov_points = calculate_fov(self.heading(), self.position(), self.distance)
+        if fov_points is not None:
+            fov_path = points_to_path(fov_points)
+
+            # update VizItem
+            self.fov_viz_item.polygons[0] = geopath_to_geovizpoly(fov_path)
+            # rospy.logerr( self.fov_viz_item.polygons[0])
+            t = time.time()
+            features = self.query.query(fov_points)
+            # features = self.query.query([(-70.855, 43.123), (-70.855, 43.12), (-70.863, 43.12), (-70.863, 43.123)])
+            t = time.time() - t
+            self.time_log[0] += t
+            self.time_log[1] += 1
+            rospy.loginfo("Query Time:" + str(t))
+            rospy.loginfo("Time Log:" + str(self.time_log))
+
+            # draw points in view
+            feature_list = GeoVizPointList()
+            feature_list.color = ColorRGBA(0, 1, 0, 1)
+            feature_list.size = 20
+            feature_viz = GeoVizItem()
+            feature_viz.point_groups = [None]
+
+            for feature in features:
+                long = feature[1]
+                lat = feature[2]
+                # rospy.logerr(str(long) +" "+ str(lat))
+
+                feat = GeoPoint(lat, long, 0)
+                feature_list.points.append(feat)
+
+            feature_viz.point_groups[0] = feature_list
+
+            # rospy.logerr("publishing")
+            # #pubish updates
+            geoVizItem_pub.publish(self.fov_viz_item)
+            geoVizItem_pub.publish(feature_viz)
+
+    def odometry_callback(self, msg):
+        self.odometry = msg
+
+    def position(self):
+        if self.odometry is not None:
+            try:
+                odom_to_earth = self.tfBuffer.lookup_transform("earth", self.odometry.header.frame_id, rospy.Time())
+            except Exception as e:
+                print(e)
+                return
+            ecef = do_transform_pose(self.odometry.pose, odom_to_earth).pose.position
+            return project11.wgs84.fromECEFtoLatLong(ecef.x, ecef.y, ecef.z)
+
+    def heading(self):
+        if self.odometry is not None:
+            o = self.odometry.pose.pose.orientation
+            q = (o.x, o.y, o.z, o.w)
+            return math.radians(90) - euler_from_quaternion(q)[2]
 
 
 if __name__ == "__main__":
-    ROS = True
-    enc_query_server(ROS)
-    
+    rospy.init_node('enc_query')
+
+    geoVizItem_pub = rospy.Publisher('project11/display', GeoVizItem, queue_size=10)
+
+    fov_query = FOVQuery(2000)
+    rospy.Timer(rospy.Duration.from_sec(.1), fov_query.iterate)
+
+    rospy.spin()
